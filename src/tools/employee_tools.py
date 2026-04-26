@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from src.data.employees import Employee, employees
 from src.tools.base import err, ok, with_retry
+from src.tools.scope import is_universal_filter
 
 
 def _serial(e: Employee) -> dict:
@@ -59,17 +60,17 @@ def list_employees(
 ) -> dict:
     """Filter employees. Any argument omitted means no filter on that field."""
     out: list[Employee] = list(employees)
-    if department:
-        d = department.strip().lower()
+    if not is_universal_filter(department):
+        d = str(department).strip().lower()
         out = [e for e in out if e.department.lower() == d]
-    if role:
-        r = role.strip()
+    if not is_universal_filter(role):
+        r = str(role).strip()
         out = [e for e in out if r.lower() in e.role.lower()]
-    if level:
-        lv = level.strip()
+    if not is_universal_filter(level):
+        lv = str(level).strip()
         out = [e for e in out if e.level == lv]
-    if location:
-        loc = location.strip()
+    if not is_universal_filter(location):
+        loc = str(location).strip()
         out = [e for e in out if e.location == loc]
     return ok(
         "employees",

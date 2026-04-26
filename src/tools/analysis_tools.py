@@ -7,6 +7,7 @@ from src.data.comp_bands import comp_bands
 from src.data.market_data import market_data
 from src.tools.base import err, ok, with_retry
 from src.tools.employee_tools import _serial
+from src.tools.scope import is_universal_filter
 
 
 def _by_id(eid: str):
@@ -41,6 +42,35 @@ def _bracket_against(value: int, p25: int, p50: int, p75: int, p90: int) -> str:
     if value < p90:
         return f"p75_to_p90"
     return f"above_p90"
+
+
+def _pairwise_demographic_gaps(
+    key: tuple[str, str, str],
+    bucket_to_comps: dict[str, list[int]],
+    dimension: str,
+) -> list[dict]:
+    """Same (role, level, location); flag pairs of groups with >10% average total_comp spread."""
+    out: list[dict] = []
+    names = [k for k, vals in bucket_to_comps.items() if vals]
+    if len(names) < 2:
+        return out
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = names[i], names[j]
+            a_avg = sum(bucket_to_comps[a]) / len(bucket_to_comps[a])
+            b_avg = sum(bucket_to_comps[b]) / len(bucket_to_comps[b])
+            if a_avg and b_avg and abs(a_avg - b_avg) / max(a_avg, b_avg) > 0.1:
+                out.append(
+                    {
+                        "dimension": dimension,
+                        "role": key[0],
+                        "level": key[1],
+                        "location": key[2],
+                        "avg_total_comp": {a: a_avg, b: b_avg},
+                        "spread_pct": abs(a_avg - b_avg) / max(a_avg, b_avg) * 100,
+                    }
+                )
+    return out
 
 
 @with_retry(max_attempts=3)
@@ -120,18 +150,28 @@ def check_band_position(
 @with_retry(max_attempts=3)
 def analyze_team(
     *,
-    department: str,
     analysis_type: str,
+    department: str | None = None,
 ) -> dict:
     """
     analysis_type: one of
       - attrition_risk: rank employees in dept by (market vs pay) and performance
-      - pay_equity: flag same-role/level comp spread by gender
+      - pay_equity: flag same-role/level/location comp spread by gender and by ethnicity
       - market_gap: aggregate gap vs market p50 (total_comp) for dept
+    department: specific name, or "all" / "company" / None for every department.
     """
-    dept = department.strip()
-    at = analysis_type.strip().lower().replace(" ", "_")
-    team = [e for e in employees if e.department.lower() == dept.lower()]
+    at = (analysis_type or "").strip().lower().replace(" ", "_")
+    if is_universal_filter(department):
+        team = list(employees)
+        dept = "all"
+    else:
+        d = str(department or "").strip()
+        if not d:
+            team = list(employees)
+            dept = "all"
+        else:
+            team = [e for e in employees if e.department.lower() == d.lower()]
+            dept = d
 
     if not team:
         return err("employees", f"No employees in department {department!r}", metadata={})
@@ -170,36 +210,22 @@ def analyze_team(
         )
 
     if at in ("pay_equity", "equity"):
-        # Same role+level+location groups
+        # Same role+level+location groups: pairwise gender and pairwise ethnicity
         by_key: dict[tuple, list] = defaultdict(list)
         for e in team:
             by_key[(e.role, e.level, e.location)].append(e)
-        issues = []
+        issues: list[dict] = []
         for key, g in by_key.items():
             if len(g) < 2:
                 continue
-            by_gender: dict[str, list] = defaultdict(list)
+            by_gender: dict[str, list[int]] = defaultdict(list)
+            by_ethnicity: dict[str, list[int]] = defaultdict(list)
             for e in g:
                 by_gender[e.demographics.gender].append(e.comp.total_comp)
-            for gend, vals in by_gender.items():
-                if len(vals) < 1:
-                    continue
-            genders = list(by_gender.keys())
-            for i in range(len(genders)):
-                for j in range(i + 1, len(genders)):
-                    ga, gb = genders[i], genders[j]
-                    a_avg = sum(by_gender[ga]) / len(by_gender[ga])
-                    b_avg = sum(by_gender[gb]) / len(by_gender[gb])
-                    if a_avg and b_avg and abs(a_avg - b_avg) / max(a_avg, b_avg) > 0.1:
-                        issues.append(
-                            {
-                                "role": key[0],
-                                "level": key[1],
-                                "location": key[2],
-                                "avg_total_comp": {ga: a_avg, gb: b_avg},
-                                "spread_pct": abs(a_avg - b_avg) / max(a_avg, b_avg) * 100,
-                            }
-                        )
+                eth = (e.demographics.ethnicity or "unknown").strip() or "unknown"
+                by_ethnicity[eth].append(e.comp.total_comp)
+            issues.extend(_pairwise_demographic_gaps(key, by_gender, "gender"))
+            issues.extend(_pairwise_demographic_gaps(key, by_ethnicity, "ethnicity"))
         return ok(
             "analysis",
             {
@@ -212,7 +238,7 @@ def analyze_team(
         )
 
     if at in ("market_gap", "dept_market_gap", "internal_vs_market"):
-        gaps = []
+        gaps: list[dict] = []
         for e in team:
             m = _market_row(e.role, e.level, e.location, "total_comp")
             if not m:
@@ -220,6 +246,7 @@ def analyze_team(
                     {
                         "employee": e.name,
                         "id": e.id,
+                        "department": e.department,
                         "gap_vs_p50": None,
                         "note": "no market data",
                     }
@@ -230,21 +257,42 @@ def analyze_team(
                     {
                         "employee": e.name,
                         "id": e.id,
+                        "department": e.department,
                         "total_comp": e.comp.total_comp,
                         "market_p50": m.p50,
                         "gap_vs_p50": g,
                     }
                 )
-        # aggregate by sub-department: average gap for those with data
         valid = [x for x in gaps if x.get("gap_vs_p50") is not None]
         avg_gap = sum(x["gap_vs_p50"] for x in valid) / len(valid) if valid else None
+        payload: dict = {
+            "department": dept,
+            "average_gap_vs_market_p50": avg_gap,
+            "per_employee": gaps,
+        }
+        if dept == "all":
+            by_dept_vals: dict[str, list[float]] = defaultdict(list)
+            for x in valid:
+                by_dept_vals[str(x.get("department", ""))].append(x["gap_vs_p50"])
+            by_department: list[dict] = []
+            for dname, vals in sorted(by_dept_vals.items()):
+                if not vals or not dname:
+                    continue
+                ag = sum(vals) / len(vals)
+                by_department.append(
+                    {
+                        "department": dname,
+                        "average_gap_vs_market_p50": ag,
+                        "employee_count": len(vals),
+                    }
+                )
+            by_department.sort(key=lambda it: -abs(float(it.get("average_gap_vs_market_p50", 0.0))))
+            payload["by_department"] = by_department
+            if by_department:
+                payload["highest_abs_gap_department"] = by_department[0]["department"]
         return ok(
             "analysis",
-            {
-                "department": dept,
-                "average_gap_vs_market_p50": avg_gap,
-                "per_employee": gaps,
-            },
+            payload,
             metadata={"analysis_type": "market_gap", "dataset": "employees + market_data"},
         )
 

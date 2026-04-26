@@ -12,6 +12,8 @@ from src.agent.state import AgentState, TaskState
 from src.tools import TOOL_LIST_DESCRIPTION, TOOL_REGISTRY
 
 DEFAULT_MODEL = "gpt-4.1-mini"
+# Imported after DEFAULT_MODEL to avoid import cycles (param_resolver imports DEFAULT_MODEL).
+from src.agent.param_resolver import normalize_plan_drafts
 
 
 class PlanTaskOut(BaseModel):
@@ -54,8 +56,8 @@ Rules:
 - For department/team questions, use analyze_team with the right analysis_type, or list_employees to narrow, then market/band tools.
 - If you need location-specific market data, you must have role, level, and location: use get_market_benchmarks or list_employees + compare_to_market per person.
 - Never invent data; tools read only from the fixture datasets.
-- For each task, set params_json to a minified JSON object of keyword args (e.g. {{"name":"Jamie Chen"}} for get_employee).
-- After a get_employee task, you may use {{}} for compare_to_market, check_band_position, get_market_benchmarks, or get_comp_band; a param-resolver pass fills kwargs from prior tool JSON before each call, with rule-based fallback for ids.
+- For each task, set params_json to a minified JSON object of keyword args (e.g. {{"name":"Jamie Chen"}} for get_employee). Drafts may be rough: a follow-up pass will rewrite them to match each tool's exact parameters.
+- After a get_employee task, you may use {{}} for compare_to_market, check_band_position, get_market_benchmarks, or get_comp_band; the plan-time param normalizer plus the executor param-resolver can fill fields from the user question and from prior tool JSON, with rule-based fallback for ids.
 """
 
     try:
@@ -81,7 +83,8 @@ Rules:
             ],
         )
 
-    task_states: list[TaskState] = []
+    uq = state.get("original_query", "") or ""
+    plan_steps: list[dict] = []
     for t in plan.tasks:
         try:
             pr = json.loads(t.params_json) if t.params_json.strip() else {}
@@ -89,6 +92,38 @@ Rules:
                 pr = {}
         except Exception:
             pr = {}
+        plan_steps.append(
+            {
+                "task_id": t.task_id,
+                "tool_name": t.tool_name,
+                "params": pr,
+                "context": t.context,
+            }
+        )
+    try:
+        normalized = normalize_plan_drafts(
+            plan_steps=plan_steps,
+            user_query=uq,
+            main_objective=plan.main_objective,
+            supervisor_context=plan.context,
+            model=state.get("model"),
+            config=config,
+        )
+    except Exception:
+        normalized = [dict(s.get("params") or {}) for s in plan_steps]
+
+    task_states: list[TaskState] = []
+    for i, t in enumerate(plan.tasks):
+        pr: dict
+        if i < len(normalized) and isinstance(normalized[i], dict):
+            pr = dict(normalized[i])
+        else:
+            try:
+                pr = json.loads(t.params_json) if t.params_json.strip() else {}
+            except Exception:
+                pr = {}
+            if not isinstance(pr, dict):
+                pr = {}
         task_states.append(
             {
                 "task_id": t.task_id,

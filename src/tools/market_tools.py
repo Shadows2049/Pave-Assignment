@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from src.data.market_data import MarketBenchmark, market_data
 from src.tools.base import err, ok, with_retry
+from src.tools.scope import is_universal_filter
 
 
 def _ser(m: MarketBenchmark) -> dict:
@@ -32,21 +33,28 @@ def get_market_benchmarks(
     Return market percentiles for role+level+location.
     If component is None, return all available components.
     """
-    r, lv, loc = role.strip(), level.strip(), location.strip()
-    rows = [
-        m
-        for m in market_data
-        if m.role == r and m.level == lv and m.location == loc
-    ]
+    rows: list[MarketBenchmark] = list(market_data)
+    if not is_universal_filter(role):
+        r0 = str(role).strip()
+        rows = [m for m in rows if m.role == r0]
+    if not is_universal_filter(level):
+        lv0 = str(level).strip()
+        rows = [m for m in rows if m.level == lv0]
+    if not is_universal_filter(location):
+        loc0 = str(location).strip()
+        rows = [m for m in rows if m.location == loc0]
     if component:
-        c = component.strip()
+        c = str(component).strip()
         rows = [m for m in rows if m.component == c]
     if not rows:
+        r_s = "all" if is_universal_filter(role) else str(role).strip()
+        lv_s = "all" if is_universal_filter(level) else str(level).strip()
+        loc_s = "all" if is_universal_filter(location) else str(location).strip()
         return err(
             "market_data",
-            f"No market benchmarks for {r} / {lv} / {loc}"
+            f"No market benchmarks for {r_s} / {lv_s} / {loc_s}"
             + (f" / component {component}" if component else ""),
-            metadata={"role": r, "level": lv, "location": loc},
+            metadata={"role": r_s, "level": lv_s, "location": loc_s},
         )
     return ok(
         "market_data",

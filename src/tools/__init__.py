@@ -29,7 +29,9 @@ Available tools (call by exact name; params are keyword-only):
 - get_comp_band(role, level, component?) -> internal bands (comp_bands)
 - compare_to_market(employee_id, component="total_comp") -> vs market p50 etc (market_data)
 - check_band_position(employee_id, component="total_comp") -> vs band (comp_bands)
-- analyze_team(department, analysis_type) -> one of: attrition_risk, pay_equity, market_gap (mixed)
+- analyze_team(analysis_type, department?) -> one of: attrition_risk, pay_equity, market_gap; pay_equity checks gender and ethnicity within same role/level/location; department may be a name, "all", or "company" for all departments (mixed)
+
+For optional filters, "all", "company", "any", or * means do not filter that field (e.g. list_employees(department="all"), get_market_benchmarks(..., location="all") ).
 
 Pass employee_id (e.g. emp-001) when a tool needs it, after resolving name with get_employee if needed.
 For a single named employee, always pair market comparison with check_band_position so the answer includes internal policy range (comp_bands) and external benchmarks (market_data).

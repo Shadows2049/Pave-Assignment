@@ -96,6 +96,164 @@ class _ResolvedOut(BaseModel):
     )
 
 
+class _PlanNormEntry(BaseModel):
+    task_id: str = Field(..., description="Same task_id as the input plan step")
+    params_json: str = Field(
+        default="{}",
+        description="Minified JSON object: valid keyword args for this tool's signature",
+    )
+
+
+class _PlanNormOut(BaseModel):
+    rows: list[_PlanNormEntry] = Field(
+        ...,
+        description="Exactly one entry per plan step, same order as the input list",
+    )
+
+
+def normalize_plan_drafts(
+    *,
+    plan_steps: list[dict[str, Any]],
+    user_query: str,
+    main_objective: str,
+    supervisor_context: str,
+    model: str | None = None,
+    config: RunnableConfig | None = None,
+) -> list[dict[str, Any]]:
+    """
+    For each plan step, ask the model to map draft fields to valid tool kwargs
+    (names + types) using introspected signatures. Called from the supervisor
+    so execution receives parameters that already match each tool.
+    `plan_steps`: each has task_id, tool_name, params (dict), context (str).
+    Returns: list of param dicts in the same order as plan_steps.
+    """
+    if not plan_steps:
+        return []
+    for it in plan_steps:
+        it.setdefault("params", {})
+        it.setdefault("context", "")
+
+    # One schema block per tool name (deduped) to keep the prompt small.
+    unique_tools: list[str] = []
+    seen: set[str] = set()
+    for it in plan_steps:
+        t = str(it.get("tool_name") or "")
+        if t and t not in seen and t in TOOL_REGISTRY:
+            seen.add(t)
+            unique_tools.append(t)
+    tool_docs = "\n\n".join(
+        f"### {name}\n{_tool_schema_block(name)}" for name in unique_tools
+    )
+    if not tool_docs.strip():
+        tool_docs = "No valid tools; pass params through as-is where possible."
+
+    items_json = json.dumps(
+        [
+            {
+                "task_id": it.get("task_id"),
+                "tool_name": it.get("tool_name"),
+                "draft": it.get("params") or {},
+                "context": it.get("context") or "",
+            }
+            for it in plan_steps
+        ],
+        indent=2,
+        default=str,
+    )
+
+    llm = ChatOpenAI(model=model or DEFAULT_MODEL, temperature=0)
+    structured = llm.with_structured_output(_PlanNormOut, method="function_calling")
+    system = f"""You normalize **draft** tool parameters from a planner into **valid** keyword arguments.
+
+Each tool is a Python function. You must only use parameter **names** that appear in the signature
+blocks below, with JSON-serializable values. Drop unknown keys. Fill required fields from the
+user question, supervisor objective, and each step's context when the draft is empty or wrong.
+
+**Resolving natural language to parameters**
+- "all departments" / "company-wide" / "everyone" → for tools that have optional filters, use the
+  documented all-company values (e.g. `department: "all"` for analyze_team, or omit optional filters
+  for list_employees when the intent is the full roster if the signature allows).
+- get_employee: use a single clear name string; no employee_id in this tool.
+- compare_to_market / check_band_position: use `employee_id` like "emp-001" if the user already gave it; otherwise you may use {{}} and leave resolution to a later run step if a prior get_employee will supply it.
+- get_market_benchmarks: `role`, `level`, and `location` are required; use "all" (or a single location) per tool behavior for location/role/level if the user asked for the entire matrix.
+- get_comp_band: `role` and `level` required in many cases; never pass `location`.
+- analyze_team: `analysis_type` is required; `department` optional — use a specific department name or "all" for all departments.
+- If you cannot fill a required field, put the best partial object you can; never invent people or ids not implied by the user.
+
+**Tool signatures**
+{tool_docs}
+""".strip()
+    human = f"""User question: {user_query!r}
+
+Main objective: {main_objective!r}
+
+Supervisor plan context: {supervisor_context!r}
+
+Plan steps to normalize (output **rows** in the same order, one `params_json` per step):
+{items_json}
+""".strip()
+    out_rows: _PlanNormOut | None = None
+    try:
+        out_rows = structured.invoke(
+            [SystemMessage(content=system), HumanMessage(content=human)],
+            config=config,
+        )
+    except Exception:
+        return [dict(it.get("params") or {}) for it in plan_steps]
+
+    if not out_rows or not out_rows.rows:
+        return [dict(it.get("params") or {}) for it in plan_steps]
+
+    def _parse_row(ent: _PlanNormEntry) -> dict[str, Any] | None:
+        raw = (ent.params_json or "{}").strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1]
+            if "```" in raw:
+                raw = raw.rsplit("```", 1)[0]
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
+
+    by_task: dict[str, dict[str, Any]] = {}
+    for ent in out_rows.rows:
+        tid = str(ent.task_id or "").strip()
+        if not tid:
+            continue
+        parsed = _parse_row(ent)
+        if parsed is None:
+            continue
+        tname = next((str(p.get("tool_name") or "") for p in plan_steps if str(p.get("task_id") or "") == tid), None)
+        if tname and tname in TOOL_REGISTRY:
+            by_task[tid] = _filter_to_tool_params(tname, parsed)
+        else:
+            by_task[tid] = parsed
+
+    result: list[dict[str, Any]] = []
+    rows = out_rows.rows
+    for i, it in enumerate(plan_steps):
+        tid = str(it.get("task_id") or "").strip()
+        tname = str(it.get("tool_name") or "")
+        original = dict(it.get("params") or {})
+        if tid in by_task:
+            result.append(by_task[tid])
+            continue
+        if i < len(rows) and len(rows) == len(plan_steps):
+            parsed = _parse_row(rows[i])
+            if parsed is not None and tname in TOOL_REGISTRY:
+                result.append(_filter_to_tool_params(tname, parsed))
+            elif parsed is not None:
+                result.append(parsed)
+            else:
+                result.append(original)
+        else:
+            result.append(original)
+    return result
+
+
 def resolve_tool_params(
     *,
     tool_name: str,
