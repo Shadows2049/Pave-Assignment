@@ -1,0 +1,8 @@
+[project]
+name = "comp-analyst-agent"
+version = "1.0.0"
+description = "Take-home exercise: Build a compensation analyst agent"
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv>=1.0.0",
+]
