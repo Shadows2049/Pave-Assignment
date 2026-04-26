@@ -50,6 +50,7 @@ Valid tool_name values (exactly):
 
 Rules:
 - If the user names a person, start with get_employee unless you already have employee_id. Then use that employee's id in compare_to_market, check_band_position, or follow-ups.
+- For any individual employee comp (market competitiveness, pay vs. peers, "are they paid fairly"), you must include check_band_position (after get_employee). Internal band (min/mid/max) and market (percentiles) together describe full comp; the run also auto-adds a band check if the plan omits it.
 - For department/team questions, use analyze_team with the right analysis_type, or list_employees to narrow, then market/band tools.
 - If you need location-specific market data, you must have role, level, and location: use get_market_benchmarks or list_employees + compare_to_market per person.
 - Never invent data; tools read only from the fixture datasets.
@@ -133,6 +134,28 @@ Rules:
                 "error": None,
             }
         ]
+
+    # Person-level comp is incomplete without internal band; ensure one band check per plan.
+    tool_names = {t["tool_name"] for t in task_states}
+    if (
+        ("get_employee" in tool_names or "compare_to_market" in tool_names)
+        and "check_band_position" not in tool_names
+    ):
+        n = len(task_states) + 1
+        task_states.append(
+            {
+                "task_id": f"t_band_{n}",
+                "plan_id": plan_id,
+                "tool_name": "check_band_position",
+                "params": {},
+                "context": "Internal comp band (min/mid/max) for this employee; required with market for full comp stats.",
+                "status": "pending",
+                "retries": 0,
+                "max_retries": 3,
+                "result": None,
+                "error": None,
+            }
+        )
 
     return {
         "main_objective": plan.main_objective,

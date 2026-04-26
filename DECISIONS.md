@@ -4,7 +4,7 @@ _This document is as important as your code. We'll discuss it in the live sessio
 
 ## Run artifacts
 
-All outputs for a run live in **one directory** per run: `output/runs/<run_id>/` (or `PAIGE_OUTPUT_DIR`). The supervisor **plan** is written first as **`plan.json`** and **`plan.md`**, the plan is **printed to the terminal**, and the run pauses for **`Execute this plan? [y/N]:`** (skipped with `python main.py -y` / `auto_approve=True`, or when stdin is not a TTY so jobs do not block). If the user declines, `run_status.json` is set to `cancelled` and execution is skipped. If approved, **`run_status.json`** moves through `executing` → `completed`, and the usual **`summary.md`**, **`trace.json`**, and **`trace.log`** are added. The repo gitignores `output/`. OpenAI `token_usage` is collected via a LangChain callback on graph config; pure-Python tool calls and HITL do not use tokens.
+All outputs for a run live in **one directory** per run: `output/runs/<run_id>/` (or `PAIGE_OUTPUT_DIR`). The supervisor **plan** is written first as **`plan.json`** and **`plan.md`**, the plan is **printed to the terminal**, then **execution always continues** to the executor and reducer (no plan confirmation or runtime prompts). **`run_status.json`** moves through `executing` → `completed`, and **`summary.md`**, **`trace.json`**, and **`trace.log`** are added. The repo gitignores `output/`. OpenAI `token_usage` is collected via a LangChain callback on graph config.
 
 ## Tool Design
 
@@ -14,14 +14,14 @@ Seven tools wrap the three fixture modules (`employees.py`, `market_data.py`, `c
 - **Market / bands:** `get_market_benchmarks` and `get_comp_band` for raw percentiles and internal min/mid/max.
 - **Analysis:** `compare_to_market`, `check_band_position`, and `analyze_team` (attrition_risk, pay_equity, market_gap) to answer multi-person questions without requiring the model to re-implement comp math in prose.
 
-All tools are wrapped with a `@with_retry` decorator (up to three internal attempts) for transient `Exception`s; business failures (e.g. not found) return `{error: ...}` and are handled in the executor with repair / HITL.
+All tools are wrapped with a `@with_retry` decorator (up to three internal attempts) for transient `Exception`s; business failures (e.g. not found) return `{error: ...}` and are handled in the executor with repair, then a failed step if the tool still errors.
 
 ## Agent Architecture
 
-A **LangGraph** workflow: **supervisor** → **executor** (loop) → **reducer**; **HITL** is an extra edge from the executor when a task cannot be repaired.
+A **LangGraph** workflow: **supervisor** → **executor** (loop) → **reducer** (no human-in-the-loop; no runtime input).
 
-1. **Supervisor** (gpt-4.1-mini, `with_structured_output`, `method="function_calling"`): turns the user question into a `SupervisorPlan` with `main_objective`, `context`, and an ordered `tasks` list. Each task names one tool; parameters are a JSON string (`params_json`) to satisfy OpenAI strict structured output (no free-form `dict` in the schema). On planner failure, a fallback `list_employees` task runs so the run still returns grounded data.
-2. **Executor:** For each task, call `TOOL_REGISTRY[tool](**params)`. If the result has an `error`, increment retries (max 3) and ask a small **repair** LLM pass for new JSON parameters. If still failing, set route to `hitl` and the **HITL** node prompts on the command line for a JSON object of param overrides, then the executor re-runs the task.
+1. **Supervisor** (gpt-4.1-mini, `with_structured_output`, `method="function_calling"`): turns the user question into a `SupervisorPlan` with `main_objective`, `context`, and an ordered `tasks` list. Each task names one tool; parameters are a JSON string (`params_json`) to satisfy OpenAI strict structured output (no free-form `dict` in the schema). On planner failure, a fallback `list_employees` task runs so the run still returns grounded data. If the plan includes `get_employee` or `compare_to_market` (individual employee) but not `check_band_position`, a **`check_band_position` task is appended** so internal band (min/mid/max) is always part of person-level comp stats alongside market.
+2. **Executor:** For each task, call `TOOL_REGISTRY[tool](**params)`. If the result has an `error`, increment retries (max 3) and ask a small **repair** LLM pass for new JSON parameters. If still failing, mark the task **failed** (store the last error envelope in `result`), advance to the next task, and let the **reducer** describe partial results and errors.
 3. **Reducer:** Aggregates all tool `result` blobs (with `source` / dataset) and produces the user-facing answer: citations, uncertainty (missing benchmarks, small `sample_size`, national bands vs. location market), and caveats. No new tools in this node.
 
 **Alternatives considered:** A single ReAct loop without an explicit plan is simpler, but a supervisor plan makes multi-step questions debuggable and matches the “assign tools with only the context needed” brief. A dedicated sub-graph per task type was rejected for the MVP time box.
@@ -34,20 +34,18 @@ A **LangGraph** workflow: **supervisor** → **executor** (loop) → **reducer**
 
 ## Chaining get_employee to downstream tools (params)
 
-The supervisor can leave `params_json` partial or empty for follow-on tools. For **every** tool call, the **executor** first runs [`param_resolver.py`](src/agent/param_resolver.py): a small LLM call that receives the **tool name**, **introspected keyword schema** (from `inspect` on the registered function), **draft params** from the plan, **full JSON** of all **prior completed step results** (in order), plus the user and supervisor text. It outputs a single JSON object of kwargs, then we **filter** to allowed parameter names so extra keys do not break tools. This is **one** mechanism for any new tool in `TOOL_REGISTRY` without N×M hand mappings. After that, [`hydration.py`](src/agent/hydration.py) runs as a **safety net** only: if `employee_id` is still missing or not an `emp-…` id, it overwrites from the last resolved employee record. Repair-on-error and HITL still apply after a failed call.
+The supervisor can leave `params_json` partial or empty for follow-on tools. For **every** tool call, the **executor** first runs [`param_resolver.py`](src/agent/param_resolver.py): a small LLM call that receives the **tool name**, **introspected keyword schema** (from `inspect` on the registered function), **draft params** from the plan, **full JSON** of all **prior completed step results** (in order), plus the user and supervisor text. It outputs a single JSON object of kwargs, then we **filter** to allowed parameter names so extra keys do not break tools. This is **one** mechanism for any new tool in `TOOL_REGISTRY` without N×M hand mappings. After that, [`hydration.py`](src/agent/hydration.py) runs as a **safety net** only: if `employee_id` is still missing or not an `emp-…` id, it overwrites from the last resolved employee record. Repair-on-error then failed-task recording apply after a failed call.
 
 ## Ambiguity & Data Quality
 
 - **Missing market rows:** Surfaces as `error` in tool output; reducer is instructed to mention gaps (e.g. no Remote market for some platform roles).
 - **Contradictory signals (market vs. band, performance vs. pay):** Brought into the `blocks` sent to the reducer; the model is asked not to pick one number silently and to flag tension.
-- **HITL:** Only when tool calls fail after repair attempts—useful for typos, ambiguous names, or parameters the planner got wrong. Non-interactive environments would need a flag to skip (not implemented in the MVP).
-
 ## What I'd Do With More Time
 
 - **Eval harness:** gold JSON expectations per tool and full-path integration tests with mocked LLM for supervisor/reducer.
 - **Stronger `get_employee`:** fuzzy match scoring + disambiguation question instead of binary error.
 - **Streaming and structured final output** (sections + table) for demo polish.
-- **HITL over stdin from env/CI** and `interrupt_before` in LangGraph for production-style review.
+- **Optional** `interrupt_before` in LangGraph for a separate product UI that approves plans or overrides params.
 
 ## AI assistance
 

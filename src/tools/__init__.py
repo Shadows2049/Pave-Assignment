@@ -32,4 +32,5 @@ Available tools (call by exact name; params are keyword-only):
 - analyze_team(department, analysis_type) -> one of: attrition_risk, pay_equity, market_gap (mixed)
 
 Pass employee_id (e.g. emp-001) when a tool needs it, after resolving name with get_employee if needed.
+For a single named employee, always pair market comparison with check_band_position so the answer includes internal policy range (comp_bands) and external benchmarks (market_data).
 """.strip()

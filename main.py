@@ -35,19 +35,12 @@ def main() -> int:
         default=None,
         help="Override output folder (default: output/runs or PAIGE_OUTPUT_DIR)",
     )
-    p.add_argument(
-        "-y",
-        "--yes",
-        action="store_true",
-        help="Auto-approve the supervisor plan (skip 'Execute? [y/N]')",
-    )
     args = p.parse_args()
     out = run_query(
         args.query,
         model=args.model,
         save_artifacts=not args.no_save,
         output_root=args.output_root,
-        auto_approve=True if args.yes else None,
     )
     if args.json:
         # Avoid non-serializable message objects

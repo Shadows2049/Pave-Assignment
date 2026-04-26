@@ -4,7 +4,6 @@ from __future__ import annotations
 import copy
 import inspect
 import json
-import sys
 import traceback
 from typing import Any, Literal
 
@@ -99,17 +98,6 @@ def _invoke_tool(name: str, params: dict) -> dict:
         }
 
 
-def _hitl_cli(task: TaskState) -> str:
-    print(
-        f"\n[HITL] Task {task.get('task_id')!r} on tool {task.get('tool_name')!r} could not be fixed automatically.",
-        file=sys.stderr,
-    )
-    if task.get("error"):
-        print(f"  Error: {task.get('error')[:500]}", file=sys.stderr)
-    line = input("  Enter a JSON object of param overrides to merge (or empty to skip param fix): ")
-    return line.strip()
-
-
 def executor_node(state: AgentState, config: RunnableConfig | None = None) -> dict:
     tasks = state.get("tasks") or []
     idx = int(state.get("current_task_index", 0))
@@ -176,43 +164,22 @@ def executor_node(state: AgentState, config: RunnableConfig | None = None) -> di
         tasks[idx] = t
         return {"tasks": tasks, "current_task_index": idx, "last_tool_error": err_msg, "executor_route": "continue"}
 
-    t["status"] = "hitl_needed"
+    # Retries exhausted: record failure and continue (reducer explains partial / errors).
+    t["status"] = "failed"
+    t["result"] = res
     tasks = tasks[:]
     tasks[idx] = t
+    nxt = idx + 1
     return {
         "tasks": tasks,
-        "current_task_index": idx,
+        "current_task_index": nxt,
         "last_tool_error": err_msg,
-        "executor_route": "hitl",
+        "executor_route": "continue" if nxt < len(tasks) else "done",
     }
 
 
-def hitl_node(state: AgentState) -> dict:
-    tasks = list(state.get("tasks") or [])
-    idx = int(state.get("current_task_index", 0))
-    if not tasks or idx >= len(tasks):
-        return {"executor_route": "done"}
-    t = copy.deepcopy(tasks[idx])
-    raw = _hitl_cli(t)
-    if raw:
-        try:
-            ovr = json.loads(raw)
-            if isinstance(ovr, dict):
-                merged = {**dict(t.get("params") or {}), **ovr}
-                t["params"] = merged
-        except Exception:
-            pass
-    t["retries"] = 0
-    t["status"] = "pending"
-    t["error"] = None
-    tasks[idx] = t
-    return {"tasks": tasks, "executor_route": "continue", "hitl_input": raw or None}
-
-
-def route_after_executor(state: AgentState) -> Literal["executor", "hitl", "reducer"]:
+def route_after_executor(state: AgentState) -> Literal["executor", "reducer"]:
     r = state.get("executor_route")
-    if r == "hitl":
-        return "hitl"
     if r == "done":
         return "reducer"
     return "executor"
