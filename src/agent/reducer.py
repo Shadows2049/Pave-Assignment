@@ -49,8 +49,9 @@ Run metadata:
 
 Rules for the Answer section:
 - Cite the dataset (source) when stating numbers, e.g. "employees" fixture, "market_data" benchmark, "comp_bands" policy range.
-- If market sample_size is small or a benchmark row is missing, call that out.
-- comp_bands are national and older than some market_data rows: mention when relevant.
+- If market sample_size is small or a benchmark row is missing, call that out explicitly.
+- comp_bands are NATIONAL (no location). market_data IS location-specific. Whenever a band result is present, you MUST note this distinction — e.g. "the internal band is a national range and does not adjust for the employee's location; market data for that location would give a more precise external comparison." If market data is missing for the employee's location, explicitly state that the band-only view is national and may not reflect local pay norms.
+- If both band and market are present, contrast them and flag any tension (e.g. in-band nationally but below market median locally).
 - Be concise, use bullets where helpful, and flag uncertainty. Do not invent data outside the given JSON.
 """.strip()
     human = f"""User question: {state.get("original_query", "")!r}
