@@ -7,6 +7,9 @@
 key.md
 *.pem
 
+# Per-run agent outputs (summary.md, trace.json, trace.log)
+output/
+
 # Python
 __pycache__/
 *.py[cod]
