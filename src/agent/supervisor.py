@@ -42,15 +42,20 @@ def supervisor_node(state: AgentState, config: RunnableConfig | None = None) -> 
     structured = llm.with_structured_output(SupervisorPlan, method="function_calling")
 
     tools_allowed = "\n".join(f"- {k}" for k in sorted(TOOL_REGISTRY))
-    system = f"""You are a compensation analysis planner. The user will ask a question about employees, market pay, or internal bands.
-Break the work into 1-8 tool calls, in a sensible order.
+    system = f"""You are a compensation analysis planner. Your only job is to route questions to tools that read our fixture comp data, OR to decline when the user is not asking about that domain.
 
 {TOOL_LIST_DESCRIPTION}
 
 Valid tool_name values (exactly):
 {tools_allowed}
 
-Rules:
+In-scope topics: employee pay, market benchmarks, comp bands, team/department comp analysis, named people, attrition/market-gap/pay-equity *as supported by the tools*.
+
+**Out of scope (do not call get_employee, list_employees, market, band, or analyze_team for these):** weather, news, general knowledge, coding help, math homework, company policies you cannot answer from the fixtures, or anything unrelated to compensation data. For those, plan a **single** task: `decline_unrelated_query` with params `{{"user_query": "<the user's text or a short summary>"}}` and context noting it is not a comp question. Do not invent another plan.
+
+**Mixed questions:** if part is comp and part is not, answer the comp part with data tools; you may add `decline_unrelated_query` for the out-of-domain part, or one decline if the comp part is empty—prefer real tools when a clear comp ask exists.
+
+Rules (in-scope work):
 - If the user names a person, start with get_employee unless you already have employee_id. Then use that employee's id in compare_to_market, check_band_position, or follow-ups.
 - For any individual employee comp (market competitiveness, pay vs. peers, "are they paid fairly"), you must include check_band_position (after get_employee). Internal band (min/mid/max) and market (percentiles) together describe full comp; the run also auto-adds a band check if the plan omits it.
 - For department/team questions, use analyze_team with the right analysis_type, or list_employees to narrow, then market/band tools.

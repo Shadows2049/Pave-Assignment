@@ -178,6 +178,7 @@ user question, supervisor objective, and each step's context when the draft is e
 - get_market_benchmarks: `role`, `level`, and `location` are required; use "all" (or a single location) per tool behavior for location/role/level if the user asked for the entire matrix.
 - get_comp_band: `role` and `level` required in many cases; never pass `location`.
 - analyze_team: `analysis_type` is required; `department` optional — use a specific department name or "all" for all departments.
+- decline_unrelated_query: pass `user_query` with the user's message (or a short paraphrase) for traceability; no fixture fields.
 - If you cannot fill a required field, put the best partial object you can; never invent people or ids not implied by the user.
 
 **Tool signatures**

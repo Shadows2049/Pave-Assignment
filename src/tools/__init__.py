@@ -8,9 +8,11 @@ from src.tools.band_tools import get_comp_band
 from src.tools.employee_tools import get_employee, list_employees
 from src.tools.market_tools import get_market_benchmarks
 from src.tools.analysis_tools import analyze_team, check_band_position, compare_to_market
+from src.tools.meta_tools import decline_unrelated_query
 
 # Callable registry: tool_name -> function
 TOOL_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
+    "decline_unrelated_query": decline_unrelated_query,
     "get_employee": get_employee,
     "list_employees": list_employees,
     "get_market_benchmarks": get_market_benchmarks,
@@ -23,6 +25,7 @@ TOOL_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
 TOOL_LIST_DESCRIPTION: str = """
 Available tools (call by exact name; params are keyword-only):
 
+- decline_unrelated_query(user_query?) -> policy text only; use when the user asks for something that is not about pay, employees, market comp, or internal bands in this app (e.g. weather, sports, coding help). Does not read any dataset.
 - get_employee(name: str) -> employee record (employees)
 - list_employees(department?, role?, level?, location?) -> list (employees)
 - get_market_benchmarks(role, level, location, component?) -> benchmarks (market_data)
